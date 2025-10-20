@@ -15,7 +15,10 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Initialize secure storage with encryption key from environment
-const tokenStorage = new SecureTokenStorage(process.env.ENCRYPTION_KEY);
+const tokenStorage = new SecureTokenStorage(
+     process.env.ENCRYPTION_KEY,
+     './data/tokens.encrypted.json'
+   );
 
 // Store code verifier for PKCE flow
 let codeVerifier = null;
