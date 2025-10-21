@@ -6,9 +6,16 @@ const crypto = require('crypto');
 const SecureTokenStorage = require('./tokenStorage');
 const fs = require('fs');
 const path = require('path');
+const multer = require('multer');
 
 const app = express();
 const PORT = process.env.PORT;
+
+// Configure multer for file uploads
+const upload = multer({ 
+  dest: '/tmp/uploads/',
+  limits: { fileSize: 500 * 1024 * 1024 } // 500MB limit
+});
 
 // Middleware
 app.use(express.json());
@@ -142,7 +149,7 @@ app.get('/auth/callback', async (req, res) => {
     codeVerifier = null;
 
     res.send(`
-      <h1>✅ Login Successful!</h1>
+      <h1>âœ… Login Successful!</h1>
       <p>Tokens acquired and stored securely.</p>
       <h2>Available Endpoints:</h2>
       <ul>
@@ -372,36 +379,38 @@ app.get('/video/status', async (req, res) => {
   }
 });
 
-// 8. Video upload API - proxies TikTok's content upload API with FILE_UPLOAD approach (2-step process)
-app.post('/video/upload', async (req, res) => {
+// 8. Video upload API - NOW ACCEPTS FILE UPLOADS FROM N8N
+app.post('/video/upload', upload.single('video'), async (req, res) => {
   try {
+    // Check if file was uploaded
+    if (!req.file) {
+      return res.status(400).json({ error: 'No video file uploaded' });
+    }
+
+    const videoPath = req.file.path;
+    const videoSize = req.file.size;
+    
+    console.log('📹 Video received from N8N:', {
+      filename: req.file.originalname,
+      size: `${(videoSize / 1024 / 1024).toFixed(2)} MB`,
+      path: videoPath
+    });
+
     const access_token = await getValidAccessToken();
-    const { file_path } = req.body;
-
-    if (!file_path) {
-      return res.status(400).json({ error: 'file_path is required' });
-    }
-
-    // Check if file exists
-    if (!fs.existsSync(file_path)) {
-      return res.status(400).json({ error: 'File not found at specified path' });
-    }
 
     // Get file stats
-    const stats = fs.statSync(file_path);
-    const fileSize = stats.size;
-    const chunkSize = (fileSize < 10 * 1024 * 1024) ? fileSize : 10 * 1024 * 1024; // 10MB chunks
-    const totalChunkCount = Math.ceil(fileSize / chunkSize);
+    const chunkSize = (videoSize < 10 * 1024 * 1024) ? videoSize : 10 * 1024 * 1024; // 10MB chunks
+    const totalChunkCount = Math.ceil(videoSize / chunkSize);
 
     console.log('Starting video upload process...');
-    console.log('File info:', { path: file_path, size: fileSize, size_mb: (fileSize / 1024 / 1024).toFixed(2) });
+    console.log('File info:', { size: videoSize, size_mb: (videoSize / 1024 / 1024).toFixed(2) });
 
     // Step 1: Initialize video upload
     console.log('Step 1: Initializing video upload...');
     const initResponse = await axios.post('https://open.tiktokapis.com/v2/post/publish/inbox/video/init/', {
       source_info: {
         source: 'FILE_UPLOAD',
-        video_size: fileSize,
+        video_size: videoSize,
         chunk_size: chunkSize,
         total_chunk_count: totalChunkCount
       }
@@ -413,6 +422,8 @@ app.post('/video/upload', async (req, res) => {
     });
 
     if (initResponse.data.error && initResponse.data.error.code !== 'ok') {
+      // Clean up temp file before throwing error
+      fs.unlinkSync(videoPath);
       throw new Error(`TikTok API Error: ${initResponse.data.error.message}`);
     }
 
@@ -420,32 +431,27 @@ app.post('/video/upload', async (req, res) => {
     console.log('Upload initialized:', { publish_id, upload_url });
 
     // Step 2: Upload video file to TikTok's designated URL
-    console.log('Step 2: Uploading video file...');
-    console.log('Upload URL:', upload_url);
-    console.log('File size:', fileSize, 'bytes');
-    console.log('Content-Range:', `bytes 0-${fileSize - 1}/${fileSize}`);
-    console.log('Content-Length:', fileSize);
+    console.log('Step 2: Uploading video file to TikTok...');
     
-    const videoBuffer = fs.readFileSync(file_path);
+    const videoBuffer = fs.readFileSync(videoPath);
     console.log('Video buffer loaded, size:', videoBuffer.length, 'bytes');
     
-    const uploadHeaders = {
-      'Content-Range': `bytes 0-${fileSize - 1}/${fileSize}`,
-      'Content-Type': 'video/mp4',
-      'Content-Length': fileSize
-    };
-    console.log('Upload headers:', uploadHeaders);
-    
     const uploadResponse = await axios.put(upload_url, videoBuffer, {
-      headers: uploadHeaders,
+      headers: {
+        'Content-Range': `bytes 0-${videoSize - 1}/${videoSize}`,
+        'Content-Type': 'video/mp4',
+        'Content-Length': videoSize
+      },
       maxContentLength: Infinity,
       maxBodyLength: Infinity
     });
 
     console.log('Upload response status:', uploadResponse.status);
-    console.log('Upload response headers:', uploadResponse.headers);
-    console.log('Upload response data:', uploadResponse.data);
-    console.log('Video uploaded to inbox successfully');
+    console.log('✅ Video uploaded to TikTok inbox successfully');
+
+    // Clean up temporary file
+    fs.unlinkSync(videoPath);
+    console.log('🗑️ Temporary file cleaned up');
 
     // Return success response with publish_id
     res.json({
@@ -454,16 +460,23 @@ app.post('/video/upload', async (req, res) => {
       data: {
         publish_id: publish_id,
         file_info: {
-          path: file_path,
-          size: fileSize,
-          size_mb: (fileSize / 1024 / 1024).toFixed(2)
+          original_name: req.file.originalname,
+          size: videoSize,
+          size_mb: (videoSize / 1024 / 1024).toFixed(2)
         },
         note: 'Video is now in TikTok inbox. User must click on inbox notifications to continue the editing flow in TikTok and complete the post.'
       }
     });
 
   } catch (err) {
-    console.error('Video upload error:', err.response?.data || err.message);
+    console.error('❌ Video upload error:', err.response?.data || err.message);
+    
+    // Clean up temp file on error
+    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+      console.log('🗑️ Temporary file cleaned up after error');
+    }
+    
     res.status(500).json({
       error: 'Video upload failed',
       details: err.response?.data || err.message
