@@ -182,27 +182,51 @@ async function getValidAccessToken() {
   }
 
   if (Date.now() < tokens.expires_at - 60 * 1000) {
+    console.log('✅ Using existing access token');
     return tokens.access_token;
   }
 
-  console.log('Refreshing TikTok access token...');
-  const refreshRes = await axios.post('https://open.tiktokapis.com/v2/oauth/token/', {
-    client_key: process.env.TIKTOK_CLIENT_KEY,
-    client_secret: process.env.TIKTOK_CLIENT_SECRET,
-    grant_type: 'refresh_token',
-    refresh_token: tokens.refresh_token,
-  });
+  console.log('🔄 Refreshing TikTok access token...');
+  
+  try {
+    // ⭐ FIX: Use URLSearchParams instead of JSON (same format as auth callback)
+    const requestData = new URLSearchParams({
+      client_key: process.env.TIKTOK_CLIENT_KEY,
+      client_secret: process.env.TIKTOK_CLIENT_SECRET,
+      grant_type: 'refresh_token',
+      refresh_token: tokens.refresh_token,
+    });
 
-  const { access_token, refresh_token, expires_in } = refreshRes.data;
+    const refreshRes = await axios.post(
+      'https://open.tiktokapis.com/v2/oauth/token/', 
+      requestData,
+      {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        }
+      }
+    );
 
-  // Save new tokens
-  tokenStorage.saveTokens({
-    access_token,
-    refresh_token,
-    expires_at: Date.now() + expires_in * 1000
-  });
+    if (refreshRes.data.error) {
+      console.error('❌ Token refresh failed:', refreshRes.data.error);
+      throw new Error(`Token refresh failed: ${refreshRes.data.error_description}`);
+    }
 
-  return access_token;
+    const { access_token, refresh_token, expires_in } = refreshRes.data;
+
+    // Save new tokens
+    tokenStorage.saveTokens({
+      access_token,
+      refresh_token,
+      expires_at: Date.now() + expires_in * 1000
+    });
+
+    console.log('✅ Token refreshed successfully');
+    return access_token;
+  } catch (error) {
+    console.error('❌ Token refresh error:', error.response?.data || error.message);
+    throw new Error(`Token refresh failed. Please re-authenticate at http://localhost:${PORT}/auth/login`);
+  }
 }
 
 // 4. Test by calling TikTok API creator_info with access token
